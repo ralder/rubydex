@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   # Trigger release flow through pushing tags
   push:
+    branches: ["feat/musl-gems"]
     tags:
       - v[0-9]+.[0-9]+.[0-9]+
       - v[0-9]+.[0-9]+.[0-9]+.beta[0-9]*
@@ -75,7 +76,7 @@ jobs:
       - name: "Install cargo-about"
         run: cargo install cargo-about --features cli
       - name: "Run cibuildgem"
-        uses: "ralder/cibuildgem/.github/actions/cibuildgem@dedc84caacfd77097fa2f414319b3bc85dd7b624"
+        uses: "ralder/cibuildgem/.github/actions/cibuildgem@9c69e17ada3894a045f04dc66e4f63c4bfa9825d"
         with:
           step: "compile"
           version: "0.4.1"
@@ -106,7 +107,7 @@ jobs:
         if: matrix.type == 'cross'
         run: gem update --system 4.1.0.beta2 --prerelease
       - name: "Run cibuildgem"
-        uses: "ralder/cibuildgem/.github/actions/cibuildgem@dedc84caacfd77097fa2f414319b3bc85dd7b624"
+        uses: "ralder/cibuildgem/.github/actions/cibuildgem@9c69e17ada3894a045f04dc66e4f63c4bfa9825d"
         with:
           step: "test_${{ matrix.type }}"
           version: "0.4.1"
@@ -125,12 +126,12 @@ jobs:
         with:
           ruby-version: "4.0.0"
       - name: "Run cibuildgem"
-        uses: "ralder/cibuildgem/.github/actions/cibuildgem@dedc84caacfd77097fa2f414319b3bc85dd7b624"
+        uses: "ralder/cibuildgem/.github/actions/cibuildgem@9c69e17ada3894a045f04dc66e4f63c4bfa9825d"
         with:
           step: "install"
           version: "0.4.1"
   compile_musl:
-    timeout-minutes: 40
+    timeout-minutes: 45
     needs: verify_version
     name: "Package RubyDEX for musl (${{ matrix.arch }})"
     strategy:
@@ -142,30 +143,25 @@ jobs:
           - os: ubuntu-22.04-arm
             arch: arm64
     runs-on: ${{ matrix.os }}
-    container: rust:1.100.0-alpine3.23
-    env:
-      RELEASE: "true"
-      RUSTFLAGS: "-C target-feature=-crt-static"
     steps:
-      - name: "Install build tools"
-        run: apk add --no-cache bash build-base clang21-dev crane gdbm-dev git gmp-dev libffi-dev linux-headers openssl-dev readline-dev yaml-dev zlib-dev
       - name: "Checkout code"
         uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-      - name: "Install Alpine Rubies and configure Rake Compiler"
-        run: bash .github/scripts/setup-musl-toolchains.sh linux/${{ matrix.arch }}
-      - name: "Install dependencies"
-        run: |
-          gem update --system 4.1.0.beta2 --prerelease
-          bundle install
-          cargo install cargo-about --features cli --locked
+      - name: "Setup Ruby for cibuildgem"
+        uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+        with:
+          ruby-version: "4.0"
+      - name: "Build the Alpine packaging image"
+        run: docker build --tag rubydex-musl-build - < .github/scripts/musl.Dockerfile
       - name: "Package musl gems"
-        uses: "ralder/cibuildgem/.github/actions/cibuildgem@dedc84caacfd77097fa2f414319b3bc85dd7b624"
+        uses: "ralder/cibuildgem/.github/actions/cibuildgem@9c69e17ada3894a045f04dc66e4f63c4bfa9825d"
         with:
           step: "compile"
           version: "0.4.1"
-          include-single-abi: true
           setup-rake-compiler: "false"
           artifact-name: "stage-linux-musl-${{ matrix.arch }}"
+          package-command: >-
+            docker run --rm --volume "$PWD:/work" --workdir /work
+            rubydex-musl-build bash .github/scripts/package-musl.sh
   install_musl:
     timeout-minutes: 10
     needs: compile_musl
@@ -181,23 +177,23 @@ jobs:
           - arch: arm64
             os: ubuntu-22.04-arm
     runs-on: ${{ matrix.os }}
-    container: ruby:${{ matrix.ruby }}-alpine3.23
     steps:
-      - name: "Install Bash for the cibuildgem action"
-        run: apk add --no-cache bash
-      - name: "Install the precompiled gem"
-        uses: "ralder/cibuildgem/.github/actions/cibuildgem@dedc84caacfd77097fa2f414319b3bc85dd7b624"
+      - name: "Download the musl package"
+        uses: actions/download-artifact@v5
         with:
-          step: "install"
-          version: "0.4.1"
-          artifact-name: "stage-linux-musl-${{ matrix.arch }}"
-      - name: "Load and use the musl extension"
+          name: "stage-linux-musl-${{ matrix.arch }}"
+      - name: "Install and load the precompiled gem in Alpine"
+        env:
+          RUBY_SERIES: ${{ matrix.ruby }}
         run: |
-          ruby -rrubydex -e '
-            platform = Gem.loaded_specs.fetch("rubydex").platform.to_s
-            abort "Expected a musl package, got #{platform}" unless platform.end_with?("-linux-musl")
-            Rubydex::Graph.new
-          '
+          docker run --rm -i --volume "$PWD/pkg:/pkg:ro" "ruby:$RUBY_SERIES-alpine3.23" sh -e <<'SH'
+          gem install --local --no-document /pkg/rubydex-*-linux-musl.gem
+          ruby -rrubydex <<'RUBY'
+          platform = Gem.loaded_specs.fetch("rubydex").platform.to_s
+          abort "Expected #{RUBY_PLATFORM}, got #{platform}" unless platform == RUBY_PLATFORM
+          Rubydex::Graph.new
+          RUBY
+          SH
   release:
     environment: release
     permissions:
@@ -216,7 +212,7 @@ jobs:
       - name: "Update RubyGems"
         run: gem update --system 4.1.0.beta2 --prerelease
       - name: "Run cibuildgem"
-        uses: "ralder/cibuildgem/.github/actions/cibuildgem@dedc84caacfd77097fa2f414319b3bc85dd7b624"
+        uses: "ralder/cibuildgem/.github/actions/cibuildgem@9c69e17ada3894a045f04dc66e4f63c4bfa9825d"
         with:
           step: "release"
           version: "0.4.1"
